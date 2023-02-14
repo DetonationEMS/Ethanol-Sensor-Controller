@@ -1,0 +1,152 @@
+/***************************************************************************
+  This program will sample a 50-150hz signal commonly  found in automotive
+  Ethanol Content sensors.  This signal also varies pulse width (1 to 5
+  milliseconds) for temperature.  After sampling the input signal the
+  program will output two PWM signals that are turned into two 0-5v linear
+  signals when using an RC Low Pass Filter for each PWM output (R=3.9kO,
+  C=1uF).  LED on pin 13 can be used for errors.
+
+  Input pin 8
+  Connect 5V pin to sensor output with pull-up resistor
+  Output pins 3 (for temperature) and 11 (ethanol %)
+  LED on pin 13 for errors, use ~1k current limit resistor
+***************************************************************************/
+#include <Arduino.h>
+
+
+// Pins
+const byte INPIN = 8;
+const byte ETHOUTPIN = 11;		// OCR2A
+const byte TEMPOUTPIN = 3;		// OCR2B
+const byte LED = 13;			// Internal LED but can also connect external
+
+// Constants
+const byte FASTBLINK = 250;			// Fast blink delay in ms
+const unsigned int SLOWBLINK = 1000;		// Slow blink delay in ms
+const unsigned int SERIALINTERVAL = 1000;	// Serial delay in ms
+const unsigned int OUTPUTDELAY = 1000; // Output delay in ms
+
+// Global variables
+float Hz; // Frequency
+unsigned long tempWidth;  		// Temperature pulse width in us = lowTime
+unsigned long highTime;		// Temperature pulse high time in us
+unsigned long lowTime;		// Temperature pulse low time in us
+unsigned long prevInterval;	// Store previous millis()
+
+// Timer Setup
+void setupTimer() {		// Setup timers (T0 for millis, T2 for PWM)
+  TCCR2A = 0b10100001;	// Fast PWM, non-inverting OCR2A & OCR2B
+  TCCR2B = 0b00000001;	// Timer = ~32kHz
+}
+/***************************************************************************/
+
+void setup() {
+  Serial.begin(9600);	// Uncomment for serial debugging
+  while (!Serial);		// Uncomment for serial debugging
+  pinMode(INPIN, INPUT);
+  pinMode(ETHOUTPIN, OUTPUT);
+  pinMode(TEMPOUTPIN, OUTPUT);
+  pinMode(LED, OUTPUT);
+  noInterrupts();
+  setupTimer();
+  interrupts();
+}
+
+void loop() {
+  sampleFuel();
+  outputPWM();
+  errorHandling();
+}
+
+/***************************************************************************/
+
+void sampleFuel() {
+
+  unsigned long tempPulse;
+
+  lowTime = 0;
+  highTime = 0;
+
+  tempPulse = pulseInLong(INPIN, HIGH, 2000000);
+  if (tempPulse > highTime) {
+    highTime = tempPulse;
+  }
+
+  tempPulse = pulseInLong(INPIN, LOW, 2000000);  // Low should only be 1ms to 5ms
+  if (tempPulse > lowTime) {
+    lowTime = tempPulse;
+  }
+
+  if (highTime + lowTime != 0) {
+    Hz = ((1.0 / double (highTime + lowTime)) * 1000000.0);
+  }
+  else Hz = 0;
+
+  tempWidth = lowTime;
+}
+
+/***************************************************************************/
+
+void outputPWM() {
+
+  static unsigned long serialPrev;
+  static unsigned long outputPrev;
+  byte constrHz = round(constrain(Hz, 50, 150));  // Constrain Hz to valuid values
+  unsigned int constrWidth = constrain(tempWidth, 1000, 5000);  //Constrain pulse width to valid values
+  int  ethOutPWM = round(((2.55 * constrHz) - 127.5));   // Scale for ethanol PWM output
+  int tempOutPWM = round(((0.06375 * constrWidth) - 63.75));   // Scale for temperature PWM output
+
+  if (millis() - outputPrev >= OUTPUTDELAY) {
+    outputPrev += OUTPUTDELAY;
+
+    analogWrite(ETHOUTPIN, ethOutPWM);
+    analogWrite(TEMPOUTPIN, tempOutPWM);
+  }
+
+  if (millis() - serialPrev >= SERIALINTERVAL) {  // Uncomment for serial debugging
+    serialPrev += SERIALINTERVAL;
+    Serial.print(highTime);
+    Serial.println(" us high");
+    Serial.print(lowTime);
+    Serial.println(" us low (tempWidth)");
+    Serial.print(constrWidth);
+    Serial.println(" us constrWidth");
+    Serial.print(Hz);
+    Serial.println(" Hz");
+    Serial.print(constrHz);
+    Serial.println(" constrHz");
+    Serial.print(tempOutPWM);
+    Serial.println(" /255 temp pwm");
+    Serial.print(ethOutPWM);
+    Serial.println(" /255 eth pwm");
+    Serial.println();
+  }
+}
+
+/***************************************************************************/
+
+void errorHandling() {
+
+  byte constrHzError = round(constrain(Hz, 0, 255));
+  static bool ledState;
+  static unsigned long prevBlink;
+
+  if (constrHzError >= 50 && constrHzError <= 150) {		//No error no blinky
+    digitalWrite(LED, LOW);
+  }
+  if (constrHzError <= 0) {	// If sensor is not connected LED will stay illuminated
+    digitalWrite(LED, HIGH);
+  }
+  if (constrHzError > 0 && constrHzError < 50 && millis() - prevBlink >= SLOWBLINK) {	// If sensor detects contaminated fuel it will blink slowly
+    ledState = (ledState == LOW) ? HIGH : LOW;
+    digitalWrite(LED, ledState);
+    prevBlink += SLOWBLINK;
+  }
+  if (constrHzError > 150 && millis() - prevBlink >= FASTBLINK) {	// If sensor detects water in fuel it will blink fast
+    ledState = (ledState == LOW) ? HIGH : LOW;
+    digitalWrite(LED, ledState);
+    prevBlink += FASTBLINK;
+  }
+}
+
+/***************************************************************************/

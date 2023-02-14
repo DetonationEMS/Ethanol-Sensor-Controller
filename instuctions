@@ -1,0 +1,17 @@
+/*
+Aaron S. (Detonation) 2020
+Parts: Arduino Nano, 0.96 OLED 4 Pin, 4.7K & 3.3k Ohm resistor 0.1uF Capacitor, GM PN#13577429 or compatible GM Flex sensor
+OLED Display
+GND - GND
+VCC - 5V
+A4 - SDA
+A5 - SLC
+
+Flex Fuel Sensor
+D8 - Flex input (Must use 4.7kohm resistor with 5v divider from Arduino)
+GND - Vehicle GND
+VCC - Vehicle 12v IGN Switched
+
+Flex Sensor ECU Out
+D11 - To ECU (D11 to One lead of Cap, Other Lead of Cap to Ground) (One lead of 3.3k Resistor to SAME lead of cap as D11, Other lead of resistor is 0-5v out)
+*/

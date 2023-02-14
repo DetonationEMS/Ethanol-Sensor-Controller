@@ -1,0 +1,211 @@
+/* Connect to Android via serial Bluetooth and demonstrate the use of interrupt
+
+A serial Bluetooth module is used to create a connection with an Android app (created with MIT AppInventor).
+Every n seconds (where n is a parameter set through the app) a status report is sent to the app.
+A simple command structure enables the app to send parameters and values to Arduino and the other way round.
+
+The circuit:
+* HC-06 Bluetooth Wireless Serial Port Module (slave) connected as follows:
+    VCC <--> 3.3V
+    GND <--> GND
+    TXD <--> Pin 0 (Rx)
+    RXD <--> Pin 1 (Tx)
+
+The Bluetooth module may interfere with PC to Arduino communication: disconnect VCC when programming the board
+
+created 2014 
+by Paolo Mosconi
+modified 2017 for use with Ethanol Content Analyzer by pabohoney1
+
+This example code is in the public domain.
+*/
+
+// Serial Parameters: COM11 9600 8 N 1
+// \r or \n to end command line
+// Bluetooth is on Pin 0 & 1 @ 9600 speed
+
+// Command structure
+// CMD SECONDS=value
+// CMD STATUS
+
+// Status message structure
+// STATUS ETH|TEMP=value
+
+//Ethanol Global Vars
+int inpPin = 8;
+
+volatile uint16_t revTick;    //Ticks per revolution
+uint16_t pwm_output  = 0;      //integer for storing PWM value (0-255 value)
+int HZ = 0;                  //unsigned 16bit integer for storing HZ input
+int ethanol = 0;              //Store ethanol percentage here
+float expectedv;              //store expected voltage here - range for typical GM sensors is usually 0.5-4.5v
+uint16_t voltage = 0;              //store display millivoltage here (0-5000)
+//temperature variables
+int duty;                     //Duty cycle (0.0-100.0)
+float period;                 //Store period time here (eg.0.0025 s)
+float temperature = 0;        //Store fuel temperature here
+int fahr = 0;
+int cels = 0;
+int celstemp = 0;
+float fahrtemp = 0;
+static long highTime = 0;
+static long lowTime = 0;
+static long tempPulse;
+
+//BT Global Vars
+int maxSeconds = 1; // send status message every maxSeconds
+
+const int ledPin = 13;   // temperature led
+
+volatile int seconds = 0;
+volatile boolean statusReport = false;
+
+String inputString = "";
+String command = "";
+String value = "";
+boolean stringComplete = false;
+
+/*
+The following timer code is needed to initialize the timer interrupt and set it to fire every .016384 seconds, the slowest timer0 can go
+For detailed information see: http://www.instructables.com/id/Arduino-Timer-Interrupts/step1/Prescalers-and-the-Compare-Match-Register/
+*/
+
+void setupBTTimer()  //setup timer0
+{
+  // initialize Timer0 for 61Hz
+  TCCR0A = 0;     // set entire TCCR1A register to 0
+  TCCR0B = 0;     // same for TCCR1B
+  // set compare match register to desired timer count:
+  OCR0A = 255;
+  // turn on CTC mode:
+  TCCR0B |= (1 << WGM12);
+  // Set CS10 and CS12 bits for 1024 prescaler:
+  TCCR0B |= (1 << CS10);
+  TCCR0B |= (1 << CS12);
+  // enable timer compare interrupt:
+  TIMSK0 |= (1 << OCIE1A);
+}
+
+
+void setupECATimer()	 // setup timer1
+{
+  // initialize timer1 for 1HZ / 1s
+	TCCR1A = 0;      // normal mode
+	TCCR1B = 132;    // (10000100) Falling edge trigger, Timer = CPU Clock/256, noise cancellation on
+	TCCR1C = 0;      // normal mode
+	TIMSK1 = 33;     // (00100001) Input capture and overflow interupts enabled
+	
+	TCNT1 = 0;       // start from 0
+}
+
+
+void setup(){
+  //start serial connection
+  Serial.begin(9600);
+
+  inputString.reserve(50);
+  command.reserve(50);
+  value.reserve(50);
+  
+  pinMode(ledPin, OUTPUT); 
+  digitalWrite(ledPin, LOW);
+  
+  cli();          // disable global interrupts
+  setupECATimer();
+  setupBTTimer();
+  sei();          // enable global interrupts
+  
+  //Serial.print("AT+NAMEArduinoBT");
+}
+
+ISR(TIMER0_COMPA_vect)
+{
+  if (seconds++ >= (maxSeconds * 61)) { //multiply by 61 so that we can essentially get 1 per second
+    statusReport = true;
+    seconds = 0;
+  }
+}
+
+ISR(TIMER1_CAPT_vect)    // PULSE DETECTED!  (interrupt automatically triggered, not called by main program)
+{
+	revTick = ICR1;      // save duration of last revolution
+	TCNT1 = 0;	     // restart timer for next revolution
+}
+
+ISR(TIMER1_OVF_vect)    // counter overflow/timeout
+{ revTick = 0; }        // Ticks per second = 0
+
+// interpret and execute command when received
+// then report status if flag raised by timer interrupt
+void loop(){
+  int intValue = 0;
+  getfueltemp(inpPin); //read fuel temp from input duty cycle
+  
+  if (revTick > 0) // Avoid dividing by zero, sample in the HZ
+  		{HZ = 62200 / revTick;}     // 3456000ticks per minute, 57600 per second 
+  		else                        // 62200 calibrated for more accuracy
+  		{HZ = 0;}
+
+    //calculate ethanol percentage
+  		if (HZ > 50) // Avoid dividing by zero
+  		{ethanol = HZ-50;}
+  		else
+  		{ethanol = 0;}
+  
+  if (ethanol > 99) // Avoid overflow in PWM
+  {ethanol = 99;}
+
+  if (statusReport) {  // Output ethanol% and temp in cels separated by comma
+    Serial.print(ethanol);
+    Serial.print(",");
+    Serial.println(cels);
+    statusReport = false;
+  }
+
+}
+
+/*
+  SerialEvent occurs whenever a new data comes in the
+ hardware serial RX.  This routine is run between each
+ time loop() runs, so using delay inside loop can delay
+ response.  Multiple bytes of data may be available.
+ */
+void serialEvent() {
+  while (Serial.available()) {
+    // get the new byte:
+    char inChar = (char)Serial.read(); 
+    //Serial.write(inChar);
+    // add it to the inputString:
+    inputString += inChar;
+    // if the incoming character is a newline or a carriage return, set a flag
+    // so the main loop can do something about it:
+    if (inChar == '\n' || inChar == '\r') {
+      stringComplete = true;
+    } 
+  }
+}
+
+void getfueltemp(int inpPin){ //read fuel temp from input duty cycle
+  highTime = 0;
+  lowTime = 0;
+  
+  tempPulse = pulseIn(inpPin,HIGH);
+    if(tempPulse>highTime){
+    highTime = tempPulse;
+    }
+  
+  tempPulse = pulseIn(inpPin,LOW);
+    if(tempPulse>lowTime){
+    lowTime = tempPulse;
+    }
+  
+  duty = ((100*(highTime/(double (lowTime+highTime))))); //Calculate duty cycle (integer extra decimal)
+  float T = (float(1.0/float(HZ)));             //Calculate total period time
+  float period = float(100-duty)*T;             //Calculate the active period time (100-duty)*T
+  float temp2 = float(10) * float(period);      //Convert ms to whole number
+  temperature = ((40.25 * temp2)-81.25);        //Calculate temperature for display (1ms = -40, 5ms = 80)
+  celstemp = int(temperature);
+  cels = celstemp;
+  fahrtemp = ((temperature*1.8)+32);
+  fahr = fahrtemp;
+}
